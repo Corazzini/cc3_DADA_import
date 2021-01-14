@@ -1,0 +1,309 @@
+---
+title: "CC3 analyse"
+output: 
+  github_document:
+   toc: true
+   toc_depth: 2
+---
+
+# Preparation 
+```{r}
+# Appel la library
+library(dada2)
+```
+
+```{r}
+# Charge les données de DADA2 enregistré précedemment 
+load("03_analyse_FinalEnv")
+```
+
+```{r}
+#Importer les jeux de données dans paths
+path <- "~/cc3_DADA_import/CC3"
+list.files(path)
+```
+
+```{r}
+fnFs <- sort(list.files(path, pattern="1.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="2.fastq", full.names = TRUE))
+sample.namesfnFs <- sapply(strsplit(basename(fnFs), "\\."), `[`, 1)
+sample.namesfnRs <- sapply(strsplit(basename(fnRs), "\\."), `[`, 1)
+sample.namesfnFs
+sample.namesfnRs
+```
+On sépare maintenant les R1 et les R2, pour cela on créer une variable FnFs qui contiendra les R1 et fnRs qui contiendra les R2. 
+
+# Score de qualité des reads
+```{r}
+plotQualityProfile(fnFs[1:2])
+```
+
+
+```{r}
+plotQualityProfile(fnRs[1:2])
+```
+La fonction plotQualityProfile permet de créer une graphique permettant de visualiser les scores de qualités.  
+En abscisse nous avons la position des paires de bases allant de 0 à 250 pb. En ordonnée nous avons le score de qualité.
+La ligne en vert correspond au score de qualité moyen pour chaque position.
+La ligne en rouge correspond au seuil où le score de qualité est de 10.
+La ligne en orange correspond a quartile de la distribution du score de qualité.
+Concernant les R1, on peut voir que en général le score de qualité est plutot bon, on descend pas en dessous du Q30 à peu près à la position 240pb. 
+Concernant les R2, on descend en dessous du Q30 a partir de la position 200pb.
+
+# Filtration des données
+```{r}
+# Placer les fichiers filtrés dans filtré
+filtFs <- file.path(path, "filtered", paste0(sample.namesfnFs, "_R1.fastq"))
+filtRs <- file.path(path, "filtered", paste0(sample.namesfnRs, "_R2.fastq"))
+names(filtFs) <- sample.namesfnFs
+names(filtRs) <- sample.namesfnRs
+filtFs
+filtRs
+```
+Ici on va ranger les fichiers dans un dossier nommé filtered contenant les objets filtFs et filtRs. 
+
+
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, trimLeft = 21, truncLen=c(240,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE)
+head(out)
+```
+
+
+La fonction filterAndTrim permet de filtrer et couper les R1 et les R2.  
+La fonction trimLeft = 21 permet d'éliminer les primers pour les reads Forward et les reads Reverse. 
+la fonction truncLen permet d'éliminer les nucléotides en position 240pb et 200pb pour conserver le meilleure score qualité pour les reads(au dessus du Q30).
+maxEE permet de recalculer le Qscore moyen apres avoir coupé une partie du read incriminé.
+MaxN=0 permet d'enlever toutes les bases dans lesquelles il y aura un N (A,T,G ou C) dans un read d'un jeu de données (le R1 et le R2).
+On peut voir qu'on a pas perdu beaucoup de read après la filtration.
+
+ 
+
+# Modèle d'erreur
+DADA2 calcul un model d'erreur à partir des données de séquençage. On applique cette méthode sur les reads forward puis reverse
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+```
+
+
+```{r}
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+
+
+```{r}
+plotErrors(errF, nominalQ=TRUE)
+```
+DADA2 analyse les variations de séquences et il va identifier et créer un modèle d'erreur grâce a la fonction learnErrors. Ce modèle d'erreur sera ensuite utiliser afin de corriger les reads du jeu de données.
+
+Ce qu'on observe ici est un plot du modèle d'erreur généré par DADA2. En abscisse nous avont le Qscore et en ordonner la probabilité. On obtient donc la probabilité d'une mutation en fonction du Qscore. Pour A2A, la pobabilité qu'un A devient un A est très forte. Pour A2C, lorsque le Qscore est très élevé, la probabilité qu'un A devient un C est faible. Si le Qscore est faible, la probablité qu'un A donne un C est élevé. A l'inverse si le Qscore est élevé alors la probabilité qu'un A donne un C est faible. 
+La courbe en noir correspond au modèle d'erreur généré par DADA2. 
+
+# Inférence d'échantillon 
+
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+```
+
+
+```{r}
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+L'objet dadaFs reçoit le modèle d'erreur pour les reads forward et l'objet dadaRs reçoit le modèle d'erreur pour les reads revers
+Pour le 1er échantillon, on avait 37487 reads et 8298 séquence unique avant la correction par DADA2.
+
+
+# Fusionner les reads appariées
+Aligner les R1 et les R2 en un contigs
+
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+```
+La commande mergePairs permet la formation de contigs seulement quand cela est possible. Cela permet de reconstruire la région hyper variable de l'ARN 16S. 
+
+
+
+# Construire une table de séquence
+
+```{r}
+# Fait une table de sequence et l'affiche
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+On a créer un objet seqtable et de dans on y met une matrice d'observation de l'objet mergers grâce a la fonction makeSequenceTable.
+la fonction dim permet d'avoir la dimension du tableau.
+Le nombre 15 correspond aux lignes et le nombre 3703 correspond aux colonnes. 
+
+```{r}
+# Inspecte la distribution des longueurs de séquence
+table(nchar(getSequences(seqtab)))
+```
+A partir de seqtab on va pouvoir savoir combien de fois on retrouve une séquence a une certaine longueur en nucléotide.
+Les reads sont répartis sur une plage assez resteinte. La majorité des reads ont une longueur de 252 pb. 
+
+# Supprimer les chimères
+ Une séquence chimère est une séquence d'ADN polymérisé par PCR mais qui n'a pas fini de se polymériser. 
+
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+
+Les séquences chimériques doivent être éliminés du jeu de données sinon cela peut entrainer des erreurs lors de nos analyses.
+l'objet seqtab.nochim est créée dans lequel la fonction removeBineraDenovo permet de supprimer les séquences chimériques.
+Ici nous avons identifié 199 chimères sur les 3703 séquences.
+Dans l'article, les chimères ont été éliminées en utilisant UCHIME.
+
+
+```{r}
+sum(seqtab.nochim)/sum(seqtab)
+```
+```{r}
+1-sum(seqtab.nochim)/sum(seqtab)
+```
+
+Il y avait 1,1% des séquences qui était des séquences chimérique, celle ci ont donc était retiré du jeu de données.
+ 
+
+# Suivre les reads dans la pipeline
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.namesfnFs
+head(track)
+```
+L'objet track correspond aux séquences après chaque étapes d'analyse réalisé ici. Pour SRR5051571_1 on passe de 42100 à 36815 séquences. 
+
+
+# Assigniation taxonomique
+Nous allons assigner une taxonomie à nos taxons grâce à silva. Cette assignation taxonomique est déposée dans l'objet taxa.
+
+```{r}
+# Assigniation Taxonomique
+taxa <- assignTaxonomy(seqtab.nochim, "~/cc3_DADA_import/silva_nr99_v138_train_set.fa.gz", multithread=TRUE)
+```
+
+```{r}
+taxa.print <- taxa
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+Ici nous pouvons inspecter les affectations taxonomiques. Les attributions vont rarement jusqu'à l'espèce car il est souvent impossible de faire des assignations d'espèces sans ambiguité à partir d'un fragment du gène 16S. L'assignation s'arrête donc souvent à la famille et parfois au genre.
+
+
+```{r}
+# Appel des library
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(ggplot2); packageVersion("ggplot2")
+
+```
+La library permet d’activer la bibliothèque indiquée. La fonction packageVersion permet de visualiser la version du package.
+
+```{r}
+theme_set(theme_bw())
+```
+
+```{r}
+# Construction d'un tableau
+samples.out <- rownames(seqtab.nochim)
+coral_metadata <- read.delim("SraRunTable.txt", header = TRUE, sep = ",")
+
+ecotype <- sapply(strsplit(coral_metadata$Sample.Name, "_"), `[`, 1)
+
+samdf <- data.frame(Ecotype=ecotype)
+rownames(samdf) <- samples.out
+samdf
+```
+Ce tableau permet de faire correspondre le nom du fichier avec l'ecotype. 
+
+
+```{r}
+# Création d'un objet ps
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxa))
+ps
+```
+
+taxtab, samdf et seqtab sont regroupés dans l’objet ps. On peut voir combien de séquences sont identifiés dans chaque échantillon. Par exemple nous avons 3504 taxa qui sont répartis en 15 échantillons et dans les 15 échantillons nous avons 1 variables.
+
+Dans l'article les indices de diversité alpha (Chao1, Simpson Evenness et Inverse Simpson Index) ont été calculés à l'aide de mothur. Les lignes de codes ne trouve pas les fonctions Chao1 et evenness Simpson. Je n'ai pas reussi a trouvé comment il fallait faire, je n'ai donc pas reussi a reproduire le tableau avec les valeurs pour les indices de diversité alpha. 
+
+
+```{r}
+library(vegan)
+library(permute)
+library(lattice)
+#chao1(pslog, taxa.row = TRUE)
+```
+```{r}
+#evenness(pslog)
+```
+```{r}
+library(plyr)
+#ddply(data,~Sites,function(x) {samdf(SIMPSON=diversity(x[-1], index="simpson")/log(sum(x[-1]>0))) })
+```
+
+
+```{r}
+library(plyr)
+ #ddply(data,~Sites,function(x) {samdf(SIMPSON=diversity(x[-1], index="simpson")) })
+```
+J'ai tenté ces lignes de code sans succès. 
+
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+```
+
+```{r}
+pslog <- transform_sample_counts(ps, function(x) log(1 + x))
+out.wuf.log <- ordinate(pslog, method = "PCoA", distance = "bray")
+```
+
+La fonction transform_sample_counts permet de transformer les données d’abondance en une OTU_table. On va construire une PCoA en utilisant la distance bray-Curtis afin d’évaluer la dissimilarité entre les taxons. Dans l'article les différences de diversité beta ont été visualisées avec une PCoA basée sur une matrice de dissimilarité de Bray_Curtis et une corrélation de Pearson.
+
+```{r}
+plot_ordination(pslog, out.wuf.log, shape = "Ecotype")
+```
+Ce graphique est une PCoA (suivant une distance de Bray-Curtis). Les axes correspondent aux variances c'est à dire à la distribution de la communauté microbienne dans les échantillons. 
+J'ai essayé de reproduire le même graphique mais je n'ai pas reussi a obtenir une légende où chaque shape correpondrait a un écotype (Dendrophylla sp, E. Fistula, R.typus et Water), j'ai tenté de tout relancé, de modifier Ecotype par d'autre chose, d'ajouté type = ("samples", "sites", "species", "taxa", "biplot", "split", "scree"). Je n'ai donc pas reussi a résoudre le problème : Shape variable was not found in the available data you provided.No shape mapped.No available covariate data to map on the points for this plot `type`
+
+De plus mon graphique ne correspond pas a celui du papier. Soit mes données sont mal traitées, soit la ligne de code est mal ecrite et ne me permet pas d'avoir les mêmes résultats. Si nous comparons mes résultats avec celui de papier on pourrait penser que les 3 petits rond tout a droite (isolé) pourrait correspondre aux échantillons d'eau. On observe quand même que certain rond sont plus proche entre eux que les autres. Par exmple les rond tout en haut a droite on peut voir qu'ils sont très regroupé par rapport aux autres. Cela pourrait peut être correspond a E.fistula ou R. typus qui sont des échantillons très regroupé entre eux mais cela est difficile a dire ...
+Je ne peux pas bien analysé ces données. 
+
+```{r}
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:26]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+
+ps
+plot_bar(ps.top20, x="Ecotype", fill="Family")
+```
+
+On réalise un diagramme en batonnet dans lequel on prend les 20 premières séquences. En ordonné nous avons les abondances pour chaque Ecotype (Dendrophylla sp, E. Fistula, R.typus et Water) et en abscisse nous avons l'ecotype. Les différentes couleurs correspondent a la famille des microorganismes retrouvé dans l'ecotype.
+
+Ici aussi les résutlats sont différent du papier, comme précement cela peut être du a mes traitements de donnée ou a mes lignes de codes. Ici les Na sont beaucoup moins abondant que ceux du papier. 
+J'ai réussi a obtenir en abscisse le nom des ecotypes et a obtenir une légende de couleur qui correspond a une famille de bactérie. On retrouve certaines familles comme par exemple : Pseudomonadaceae, Rhodobacteraeae, Vibrionaceae, Moraxellaceae, Alteromonadaceae et Flavobacteriaceae qui sont également retrouvé dans le papier. 
+
+On peut voir que pour l'échantillion d'eau de mer Alteromonadaceae est très abondante et Pseudomonadaceae est moins abondant alors que sur la papier c'est l'inverse. 
+
+Dans le papier on pouvait voir que la composition de la communauté bactérienne dans les échantillons de corail était nettement différente de celle des échantillons d'eau de mer. Dans mes résultats il sembelerait que les échantillons d'eau de mer ont une composition de communauté bactérienne différent de celle des échantillons de corail.
+On peut également voir ici que la composition de la communauté microbienne est spécifique pour chaque corail et l'abondance était également différentes entre les coraux, comme dans le papier. 
+
+# Camembert
+
+Je n'ai pas reussi a trouvé comment faire des camembert avec des données de phyloseq malgrés mes recherches sur internet. 
+
+
+```{r}
+# Sauvegarde des données dans l'environnement afin de les réutiliser
+save.image(file="03_analyse_FinalEnv")
+```
